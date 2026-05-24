@@ -6,7 +6,7 @@ from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
     BufferedInputFile
 )
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -55,8 +55,6 @@ FILE_CATEGORIES = {
     "💻 Код": ["PY", "JAVA", "C", "CPP", "H", "GO", "RS", "SQL"],
     "⚙️ Скрипты": ["SH", "BAT", "PS1"],
 }
-
-ALL_EXTENSIONS = [ext for exts in FILE_CATEGORIES.values() for ext in exts]
 
 
 # ==================== КЛАВИАТУРЫ ====================
@@ -127,7 +125,6 @@ def file_ext_kb(category: str) -> InlineKeyboardMarkup:
 
 
 def code_lang_kb() -> InlineKeyboardMarkup:
-    # Для кода показываем только программистские расширения
     code_exts = ["PY", "JS", "TS", "JAVA", "C", "CPP", "H", "GO", "RS",
                  "HTML", "CSS", "PHP", "SQL", "SH", "BAT", "JSON", "XML", "YAML", "TXT", "MD"]
     buttons = []
@@ -145,7 +142,6 @@ def code_lang_kb() -> InlineKeyboardMarkup:
 
 # ==================== УТИЛИТЫ ====================
 def sanitize_filename(name: str) -> str:
-    """Очищает имя файла от недопустимых символов."""
     forbidden = r'\/:*?"<>|'
     for ch in forbidden:
         name = name.replace(ch, "_")
@@ -153,11 +149,9 @@ def sanitize_filename(name: str) -> str:
     return name or "file"
 
 
-def convert_image(image_bytes: bytes, target_fmt: str) -> tuple[bytes, str]:
-    """Конвертирует изображение. Возвращает (байты, mime-тип)."""
+def convert_image(image_bytes: bytes, target_fmt: str) -> tuple:
     img = Image.open(io.BytesIO(image_bytes))
 
-    # Для JPG/WEBP/BMP нужен RGB (без прозрачности)
     if target_fmt in ("JPG", "BMP") and img.mode in ("RGBA", "P", "LA"):
         bg = Image.new("RGB", img.size, (255, 255, 255))
         if img.mode == "P":
@@ -217,10 +211,13 @@ async def cmd_start(message: Message, state: FSMContext):
 @router.callback_query(F.data == "back:main")
 async def back_to_main(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.edit_text(
-        "🏠 <b>Главное меню</b>\n\nВыбери действие:",
-        reply_markup=main_menu_kb()
-    )
+    try:
+        await call.message.edit_text(
+            "🏠 <b>Главное меню</b>\n\nВыбери действие:",
+            reply_markup=main_menu_kb()
+        )
+    except Exception:
+        await call.message.answer("🏠 <b>Главное меню</b>\n\nВыбери действие:", reply_markup=main_menu_kb())
     await call.answer()
 
 
@@ -256,7 +253,7 @@ async def conv_start(call: CallbackQuery, state: FSMContext):
 
 @router.message(States.conv_wait_file, F.photo)
 async def conv_get_photo(message: Message, state: FSMContext):
-    photo = message.photo[-1]  # самое большое
+    photo = message.photo[-1]
     if photo.file_size and photo.file_size > MAX_FILE_SIZE:
         await message.answer(f"❌ Файл слишком большой (лимит {MAX_FILE_SIZE_MB} МБ).")
         return
@@ -313,7 +310,6 @@ async def conv_do_convert(call: CallbackQuery, state: FSMContext):
 # ==================== СОЗДАНИЕ ФАЙЛОВ ====================
 @router.callback_query(F.data == "menu:create")
 async def create_start(call: CallbackQuery, state: FSMContext):
-    await state.set_state(States.create_wait_content)
     await call.message.edit_text(
         "📄 <b>Создание файла</b>\n\nВыбери категорию:",
         reply_markup=file_category_kb()
@@ -420,7 +416,6 @@ async def rename_apply(message: Message, state: FSMContext):
 
     safe_name = sanitize_filename(new_name.rsplit(".", 1)[0]) + "." + new_name.rsplit(".", 1)[1].strip()
     file_bytes = data["file_bytes"]
-    mime = data["mime"]
 
     await message.answer_document(
         document=BufferedInputFile(file_bytes, filename=safe_name),
@@ -433,7 +428,6 @@ async def rename_apply(message: Message, state: FSMContext):
 # ==================== КОД В ФАЙЛ ====================
 @router.callback_query(F.data == "menu:code")
 async def code_start(call: CallbackQuery, state: FSMContext):
-    await state.set_state(States.code_wait_code)
     await call.message.edit_text(
         "💻 <b>Код → Файл</b>\n\nВыбери язык/расширение:",
         reply_markup=code_lang_kb()
@@ -457,23 +451,23 @@ async def code_ask_code(call: CallbackQuery, state: FSMContext):
 
 @router.message(States.code_wait_code, F.text)
 async def code_save(message: Message, state: FSMContext):
-    # Telegram ограничивает одно сообщение ~4096 символами, но мы берём что есть
-    code = message.text
-    # Если пользователь обернул в 
+    code = message.text or ""
+    
+    # Снимаем обёртку markdown (
 ```code
-```, снимем обёртку
-    if code.startswith("
-```") and code.endswith("
-```"):
+```), если она есть.
+    # Используем конкатенацию, чтобы избежать багов парсинга Markdown при копировании!
+    backticks = "`" * 3
+    if code.startswith(backticks) and code.endswith(backticks):
         lines = code.split("\n")
         if len(lines) >= 2:
-            # убираем первую и последнюю строку
             code = "\n".join(lines[1:-1])
 
     await state.update_data(code=code)
     await state.set_state(States.code_wait_name)
     data = await state.get_data()
     ext = data.get("extension", "txt")
+    
     await message.answer(
         f"📥 Код принят ({len(code)} символов, ~{len(code.encode('utf-8'))} байт).\n\n"
         f"Введи имя файла <b>без расширения</b> (.{ext.lower()} добавится автоматически):",
